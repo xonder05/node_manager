@@ -1,13 +1,23 @@
 #include "node_manager/subprocess_manager.hpp"
 
 SubprocessManager::SubprocessManager() { }
-SubprocessManager::~SubprocessManager() { }
-
-void SubprocessManager::StartNode(std::string package_name, std::string node_name, rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher)
+SubprocessManager::~SubprocessManager() 
 {
-    std::string identifier = node_name + "1";
+    for (auto& pair : processes)
+    {
+        std::cout << "stopping " << pair.first << std::endl;
+        StopNode(pair.first);
+    }
+}
 
-    process &p = processes[identifier];
+void SubprocessManager::StartNode(std::string id, std::string package_name, std::string node_name, rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher)
+{
+    if (processes.find(id) != processes.end())
+    {
+        return;
+    }
+
+    process &p = processes[id];
 
     p.child = boost::process::child(
         boost::process::search_path("ros2"), "run", package_name, node_name,

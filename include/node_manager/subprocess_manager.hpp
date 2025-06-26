@@ -54,6 +54,6 @@ public:
     SubprocessManager(/* args */);
     ~SubprocessManager();
 
-    void StartNode(std::string package_name, std::string node_name, rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher);
+    void StartNode(std::string id, std::string package_name, std::string node_name, rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher);
     void StopNode(std::string node_name);
 };

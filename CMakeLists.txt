@@ -1,15 +1,24 @@
 cmake_minimum_required(VERSION 3.8)
 project(node_manager)
 
+# custom interfaces generation
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/NodeRedCommand.msg"
+)
+
+ament_export_dependencies(rosidl_default_runtime)
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
+# compiler
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system thread filesystem)
 
@@ -19,13 +28,15 @@ add_executable(agent
     src/subprocess_manager.cpp
 )
 
+# link ament
 ament_target_dependencies(agent
     rclcpp
-    interfaces
     std_msgs
 )
 
+# link other
 target_link_libraries(agent 
+    ${cpp_typesupport_target} # local ros2 interfaces
     Boost::system 
     Boost::thread
     Boost::filesystem
