@@ -20,11 +20,12 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system thread filesystem)
+find_package(Boost REQUIRED COMPONENTS system thread filesystem json)
 
 # files to be build
 add_executable(agent 
-    src/agent.cpp
+    src/main.cpp
+    src/node_manager.cpp
     src/subprocess_manager.cpp
 )
 
@@ -40,6 +41,7 @@ target_link_libraries(agent
     Boost::system 
     Boost::thread
     Boost::filesystem
+    Boost::json
 )
 
 # header files location
