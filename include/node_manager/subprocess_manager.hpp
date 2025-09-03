@@ -1,133 +1,361 @@
 /**
  * @file subprocess_manager.hpp
- * @brief Class for managing processes using boost::process library
+ * @brief Class representing a single subprocess, handles starting, reading stdout/stderr and gracefull stoping.
  * @author Onderka Daniel (xonder05)
- * @date 06/2025
+ * @date 09/2025
  */
 
 #pragma once
 
-#include <iostream>
-#include <string>
-#include <unordered_map>
-#include <thread>
-#include <boost/process.hpp>
+#include <unistd.h> // fork() execv() pipe()
+#include <sys/types.h> // pid_t
+#include <sys/wait.h> // waitpid()
+#include <sys/stat.h> // stat()
+#include <signal.h> // kill()
 
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <chrono>
+#include <sstream>
+
+#include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
 
-struct process
+class Subprocess
 {
-    boost::process::child child;
-    boost::process::ipstream stdout_stream;
-    std::thread stdout_thread;
-};
+protected:
 
-class SubprocessManager
-{
-private:
+    pid_t pid;
+    int pipes[2];
+    std::thread reader_thread;
 
-    std::unordered_map<std::string, process> processes;
+    std::string executable_name;
+    std::string executable_path;
+    std::vector<std::string> arguments_string;
+    std::vector<char*> arguments_char;
+
+    bool init_success = false;
+    bool process_started = false;
+
+    /**
+     * @brief Either validates or finds the absolute path to the file (finding using PATH), and checks that it can be executed.
+     * 
+     * @param executable file name or full path
+     * @return full path to valid executable (or empty string in case of error)
+     */
+    std::string GetFullExecutablePath(const std::string executable)
+    {
+        // executable is entire path
+        if (executable.find('/') != std::string::npos) 
+        {
+            struct stat st;
+
+            if (stat(executable.c_str(), &st) == -1) {
+                perror("stat");
+                return "";
+            }
+
+            if (st.st_mode & S_IXUSR) {
+                return executable;
+            } 
+            else {
+                std::cerr << "Executable file exists but i don't have permission to execute it" << std::endl;
+                return "";
+            }
+        }
+        else // executable is just name
+        {
+            const char *PATH = std::getenv("PATH");
+            if (!PATH) {
+                return "";  
+            } 
+
+            std::stringstream ss(PATH);
+            std::string path;
+
+            while (std::getline(ss, path, ':')) 
+            {
+                std::string executable_path = path + "/" + executable;
+
+                struct stat st;
+                if (stat(executable_path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR)) 
+                {
+                    return executable_path;
+                }
+            }
+
+            std::cerr << "Executable is either not in PATH or i don't have execute permission" << std::endl;
+            return "";
+        }
+    }
+
+    /**
+     * @brief Child's part after calling fork()
+     * 
+     * creates new group for potential child processes,
+     * handles redirection of stdout and stderr into pipe,
+     * lastly gives control to child program
+     */
+    void Child()
+    {
+        // assign group id to this process, (0, 0) means use pid of active process
+        setpgid(0, 0);
+
+        // close read end of pipe, child does not read
+        close(pipes[0]);
+
+        // redirect both stdout and stderr of this process into pipe
+        dup2(pipes[1], STDOUT_FILENO);
+        dup2(pipes[1], STDERR_FILENO);
+
+        // this end has been copied to the stdout and stderr, so it can be closed here
+        close(pipes[1]);
+
+        // hand over control to the child binary
+        execv(executable_path.c_str(), arguments_char.data());
+        perror("execv");
+    }
+
+    /**
+     * @brief Parent's part after calling fork() 
+     * 
+     * derived classes should override this and use it to setup a reader thread for child's stdout / stderr,
+     * this way derived classes don't have to override the entire Start() method
+     * 
+     * @return All return values are described in this_package_root/msg/README.md
+     */
+    virtual int Parent()
+    {
+        // close write end of the pipe, parent will not write
+        close(pipes[1]);
+
+
+        // todo: figure out if there is a way to check if execv() succeeded
+        // one idea would be to create thread that will periodically check that the child is still alive
+        return 0;
+    }
 
 public:
 
     /**
-     * @brief Empty constructor for SubprocessManager
-     */
-    SubprocessManager() { }
-
-    /**
-     * @brief Stops all managed processes and destroys SubprocessManager object
-     */
-    ~SubprocessManager() 
-    {
-        for (auto& pair : processes)
-        {
-            StopProcess(pair.first);
-        }
-    }
-
-    /**
-     * @brief Starts a new child process and adds a record to processes map
-     *
-     * @tparam F any function for processing stdout
-     * @tparam FParams list of parameters that will be passed to the function of type F
+     * @brief Constructor
      * 
-     * @param id identification of the process, matches node id in manager and node-red
-     * @param command process to be run, eg: "ros2, ls, pwd"
-     * @param command_params parameters of the command
-     * @param func function for processing stdout, will be run in separate thread 
-     * @param func_params parameters for the function
+     * prepares input arguments and evarything else for Start()
      * 
-     * @return meaning of return values can be found in /msg/README.md
+     * @param exec name or path to the executable
+     * @param args vector of string arguments
      */
-    template<typename F, typename... FParams>
-    int StartProcess(std::string id, std::string command, std::vector<std::string> command_params, F func, std::tuple<FParams...> func_params)
+    Subprocess(std::string exec, std::vector<std::string> args) 
     {
-        // process already exists
-        if (processes.find(id) != processes.end()) {
-            return 21;
+        // persistent storage (otherwise stuff breaks when this goes out of scope)
+        executable_name = exec;
+        arguments_string = args;
+
+        // get full executable path from command name
+        executable_path = GetFullExecutablePath(executable_name);
+        if (executable_path.empty()) {
+            std::cerr << "This: " << executable_name << " is not a valid executable " << std::endl;
+            return;
         }
-
-        process &p = processes[id];
-
-        p.child = boost::process::child(boost::process::search_path(command), boost::process::args(command_params),
-            (boost::process::std_out & boost::process::std_err) > p.stdout_stream
-        );
-
-        std::cout << "starting thread" << std::endl;
-        p.stdout_thread = std::thread(func, std::ref(p), func_params);
-
-        std::cout << "success in starting a new process" << std::endl;
-        // process succesfully started
-        return 01;
-    }
-
-    /**
-     * @brief Kills child process, helper threads and deletes record from processes map 
-     *
-     * @param id identification of the process, matches node id in manager and node-red
-
-     * @return meaning of return values can be found in /msg/README.md
-     */
-    int StopProcess(std::string id)
-    {
-        // process does not exist
-        if (processes.find(id) == processes.end()) {
-            return 25;
-        }
-        process& p = processes[id];
-
-        p.child.terminate();
-        p.child.wait();
-        std::cout << "Subprocess succesfully stopped with return code " << p.child.exit_code() << std::endl;
-
-        if (!p.stdout_thread.joinable())
-        {
-            std::cout << "Thread is not joinable" << std::endl;
-            return 29;
-        }
-        p.stdout_thread.join();
-
-        processes.erase(id);
-
-        return 05;
-    }
-
-    /**
-     * @brief Restarts running process
-     *
-     * @see StopProcess, StartProcess
-     */
-    template <typename F, typename... FParams>
-    int RestartProcess(std::string id, std::string command, std::vector<std::string> command_params, F func, std::tuple<FParams...> func_params)
-    {
-        int ret = StopProcess(id);
         
-        if (ret != 05) {
-            return ret;
+        // convert strings to char pointers because of exec()
+        // argv[0] == executable name
+        arguments_char.push_back(const_cast<char*>(executable_path.c_str()));
+
+        // normal args
+        for (auto &a : arguments_string) {
+            arguments_char.push_back(const_cast<char*>(a.c_str()));
         }
 
-        return StartProcess(id, command, command_params, func, func_params);
+        // null terminated
+        arguments_char.push_back(nullptr);
+
+        // generate pipe, [0] == read end, [1] == write end
+        if (pipe(pipes) == -1) { 
+            perror("Pipe could not be generated"); 
+            return; 
+        }
+
+        init_success = true;
     }
 
+    /**
+     * @brief Destructor
+     */
+    ~Subprocess() 
+    {
+        if (process_started)
+        {
+            Stop();
+        }
+    }
+
+    /**
+     * @brief If constructor succeeded then everything is ready and this just calls fork
+     * 
+     * @return All return values are described in this_package_root/msg/README.md
+     */
+    int Start()
+    {
+        if (!init_success && process_started) {
+            return 1;
+        }
+
+        pid = fork();
+        
+        if (pid < 0) {
+            perror("fork");
+            return 1;
+        }
+
+        if (pid == 0) {
+            Child();
+            exit(1); //child failed in execv()
+        }
+        else {
+            return Parent();
+        }
+    }
+
+    /**
+     * @brief Tries to stop the child process (uses increasing force SIGINT, SIGTERM, SIGKILL)
+     * 
+     * @param wait how much time does the child get to react after receiving singnal
+     * @return All return values are described in this_package_root/msg/README.md
+     */
+    void Stop(int exit_wait_time = 1)
+    {
+        for (auto level : {SIGINT, SIGTERM, SIGKILL, INT8_MAX})
+        {
+            int status;
+            pid_t res = waitpid(-pid, &status, WNOHANG);
+
+            if (res == -1) {
+                perror("waitpid");
+                break;
+            }
+            
+            if (res == 0)
+            {
+                if (level == INT8_MAX)
+                {
+                    std::cerr << "Child (pid: " << pid << ") is still running even after SIGKILL, ignoring" << std::endl;
+                    return;
+                }
+
+                if (kill(-pid, level) == -1) {
+                    perror("kill");
+                }
+
+                std::this_thread::sleep_for(std::chrono::seconds(exit_wait_time));
+
+                continue;
+            }
+
+            if (WIFEXITED(status)) {
+                std::cout << "Child exited with code " << WEXITSTATUS(status) << std::endl;
+            } 
+            else if (WIFSIGNALED(status)) {
+                std::cout << "Child killed by signal " << WTERMSIG(status) << std::endl;
+            }
+
+            reader_thread.join();
+
+            break;
+        }
+    }
+
+};
+
+class SubprocessWithConsoleOutput : public Subprocess
+{
+protected:
+
+    /**
+     * @brief Prints childs output into console
+     * 
+     * This will be started in separate thread to handle output from the child process
+     * 
+     * @param fd file descriptor for the pipe where stdout and stderr of child is redirected
+     */
+    static void ChildOutputHandler(int fd)
+    {
+        char buffer[256];
+        ssize_t n;
+
+        while ((n = read(fd, buffer, sizeof(buffer)-1)) > 0) 
+        {
+            buffer[n] = '\0';
+            std::cout << buffer << std::flush;
+        }
+    }
+
+    /**
+     * @brief Calls base Parent() and starts ChildOutputHandler() in a thread
+     * 
+     * @return All return values are described in this_package_root/msg/README.md
+     */
+    int Parent() override
+    {
+        int ret = Subprocess::Parent();
+
+        reader_thread = std::thread(ChildOutputHandler, pipes[0]);
+
+        return ret;
+    }
+};
+
+class SubprocessWithRosPublisher : public Subprocess
+{
+protected:
+
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher;
+
+    /**
+     * @brief Publishes childs output into ros2 topic
+     * 
+     * This will be started in separate thread to handle output from the child process
+     * 
+     * @param fd file descriptor for the pipe where stdout and stderr of child is redirected
+     * @param publisher pointer to ros2 publisher object
+     */
+    static void ChildOutputHandler(int fd, rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher)
+    {
+        std_msgs::msg::String msg;
+        char buffer[256];
+        ssize_t n;
+
+        while ((n = read(fd, buffer, sizeof(buffer)-1)) > 0) 
+        {
+            buffer[n] = '\0';
+            msg.data = buffer;
+            publisher->publish(msg);
+        }
+    }
+
+    /**
+     * @brief Calls base Parent() and starts ChildOutputHandler() in a thread
+     * 
+     * @return All return values are described in this_package_root/msg/README.md
+     */
+    int Parent() override
+    {
+        int ret = Subprocess::Parent();
+
+        reader_thread = std::thread(ChildOutputHandler, pipes[0], publisher);
+
+        return ret;
+    }
+
+public:
+
+    /**
+     * @brief Same as base constructor, additionally just saves publisher pointer into class atribute
+     */
+    SubprocessWithRosPublisher(std::string exec, std::vector<std::string> args, rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ros2_publisher)
+    : Subprocess(exec, args)
+    {
+        publisher = ros2_publisher;
+    }
 };
