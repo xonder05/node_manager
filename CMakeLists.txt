@@ -20,13 +20,12 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system thread filesystem json)
+find_package(Boost REQUIRED COMPONENTS thread json)
 
 # files to be build
 add_executable(agent 
     src/main.cpp
     src/node_manager.cpp
-    src/subprocess_manager.cpp
 )
 
 # link ament
@@ -38,9 +37,7 @@ ament_target_dependencies(agent
 # link other
 target_link_libraries(agent 
     ${cpp_typesupport_target} # local ros2 interfaces
-    Boost::system 
     Boost::thread
-    Boost::filesystem
     Boost::json
 )
 

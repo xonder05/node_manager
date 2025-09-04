@@ -15,13 +15,6 @@
 #include <sys/select.h>
 #include <unistd.h>
 
-struct node
-{
-    node_manager::msg::NodeRedCommand::ConstSharedPtr configuration;
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr stdout_publisher;
-};
-
-
 class NodeManager : public rclcpp::Node
 {
 public:
@@ -29,9 +22,8 @@ public:
     NodeManager();
     ~NodeManager();
 
-    int RunNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg);
-    int StopNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg);
-    int RunLaunchFile();
+    int CreateNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg);
+    int DeleteNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg);
 
     // todo lifecycle commands?
 
@@ -39,9 +31,13 @@ private:
 
     std::string manager_id;
 
-    std::unordered_map<std::string, node> nodes;
+    struct node
+    {
+        node_manager::msg::NodeRedCommand::ConstSharedPtr configuration;
+        std::shared_ptr<SubprocessWithRosPublisher> process;
+    };
 
-    SubprocessManager subprocess_manager;
+    std::unordered_map<std::string, node> nodes;
 
     rclcpp::Subscription<node_manager::msg::NodeRedCommand>::SharedPtr command_subscriber;
     rclcpp::Publisher<node_manager::msg::NodeRedCommand>::SharedPtr command_publisher;
@@ -51,7 +47,5 @@ private:
 
     void commandCallback(node_manager::msg::NodeRedCommand::ConstSharedPtr msg);
     std::vector<std::string> ParseJson(std::string json);
-
-    static void stream_thread(process& p, std::tuple<rclcpp::Publisher<std_msgs::msg::String>::SharedPtr> args_tuple);
-
+    int ParameterChangeOnNode(std::string node_name, std::vector<std::string> params);
 };

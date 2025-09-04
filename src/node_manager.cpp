@@ -7,26 +7,11 @@ NodeManager::NodeManager() : Node("node_manager")
     .reliable() // reliability
     .transient_local(); // durability
 
-    // publisher_ = this->create_publisher<std_msgs::msg::String>
-    //     ("/management/agent_advertisement", qos);
-
-    // std_msgs::msg::String msg;
-    // msg.data = "this is my id";
-    // this->publisher_->publish(msg);
-
-    // todo get presistent manager id from parameter
-
     this->declare_parameter("manager_id", "");
     manager_id = this->get_parameter("manager_id").as_string();
 
     command_subscriber = this->create_subscription<node_manager::msg::NodeRedCommand>("/management/commands", 10, std::bind(&NodeManager::commandCallback, this, std::placeholders::_1));
     command_publisher = this->create_publisher<node_manager::msg::NodeRedCommand>("/management/commands", qos);
-
-    timer_ = this->create_wall_timer(
-            std::chrono::seconds(10),
-            [this]() {
-                RCLCPP_INFO(this->get_logger(), "Timer callback triggered");
-            });
 
     RCLCPP_INFO(this->get_logger(), "NodeManager initialization done.");
 }
@@ -45,11 +30,11 @@ void NodeManager::commandCallback(node_manager::msg::NodeRedCommand::ConstShared
     {
         case 0:
         {
-            int res = RunNode(msg);
+            int res = CreateNode(msg);
             node_manager::msg::NodeRedCommand reply;
             
             reply.manager_id = this->manager_id;
-            reply.message_type = 99;
+            reply.message_type = 90;
             reply.node_id = msg->node_id;
             reply.return_value = res;
 
@@ -59,12 +44,28 @@ void NodeManager::commandCallback(node_manager::msg::NodeRedCommand::ConstShared
         
         case 1:
         {
-            int res = StopNode(msg);
+            int res = DeleteNode(msg);
 
             node_manager::msg::NodeRedCommand reply;
             
             reply.manager_id = this->manager_id;
-            reply.message_type = 99;
+            reply.message_type = 90;
+            reply.node_id = msg->node_id;
+            reply.return_value = res;
+
+            this->command_publisher->publish(reply);
+
+            break;
+        }
+
+        case 2:
+        {
+            int res = CreateNode(msg);
+
+            node_manager::msg::NodeRedCommand reply;
+            
+            reply.manager_id = this->manager_id;
+            reply.message_type = 90;
             reply.node_id = msg->node_id;
             reply.return_value = res;
 
@@ -76,50 +77,6 @@ void NodeManager::commandCallback(node_manager::msg::NodeRedCommand::ConstShared
         default:
             RCLCPP_INFO(this->get_logger(), "I heard unknown message type\n");
             break;
-    }
-}
-
-void NodeManager::stream_thread(process& p, std::tuple<rclcpp::Publisher<std_msgs::msg::String>::SharedPtr> args_tuple) 
-{
-    // get unix file descriptor
-    int fd = p.stdout_stream.pipe().native_source();
-
-    // prepare for select()
-    fd_set set;
-    struct timeval timeout;
-
-    // prepare for reading data
-    std::string line;
-    std_msgs::msg::String msg;
-    auto [publisher] = args_tuple;
-
-    // reading loop
-    while (p.child.running()) 
-    {
-        FD_ZERO(&set);
-        FD_SET(fd, &set);
-        
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
-
-        int ret = select(fd + 1, &set, NULL, NULL, &timeout);
-
-        // no data received
-        if (ret == 0) 
-        {
-            continue;
-        }
-        // error
-        else if (ret < 0)
-        {
-        }
-        // got data
-        else 
-        {
-            std::getline(p.stdout_stream, line);
-            msg.data = line;
-            publisher->publish(msg);
-        }
     }
 }
 
@@ -152,45 +109,79 @@ std::vector<std::string> NodeManager::ParseJson(std::string json)
     return command_parameters;
 }
 
-int NodeManager::RunNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg)
+int NodeManager::ParameterChangeOnNode(std::string node_name, std::vector<std::string> params)
 {
-    // start new node
-    if (nodes.find(msg->node_id) == nodes.end())
+    auto client = std::make_shared<rclcpp::SyncParametersClient>(this, node_name);
+
+    if (!client->wait_for_service(std::chrono::seconds(1))) {
+        RCLCPP_ERROR(this->get_logger(), "Parameter service not available on node %s", node_name);
+        return 1;
+    }
+
+    for (auto param : params)
     {
-        RCLCPP_INFO(this->get_logger(), "Starting node");
+        auto pos = param.find(":=");
+        if (pos != std::string::npos) 
+        {
+            std::string name  = param.substr(0, pos);
+            std::string value = param.substr(pos + 2);
+
+            auto results = client->set_parameters({rclcpp::Parameter(name, value)});
+
+            for (auto & result : results)
+            {
+                if (!result.successful) 
+                {
+                    RCLCPP_WARN(this->get_logger(), "Failed to set param %s: %s", name, result.reason.c_str());
+                    return 1;
+                }   
+            }
+        }
+    }
+
+    return 0;
+}
+
+int NodeManager::CreateNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg)
+{
+    auto it = nodes.find(msg->node_id);
+
+    // node does not exist yet
+    if (it == nodes.end())
+    {
+        RCLCPP_INFO(this->get_logger(), "Creating a new node");
+
+        node n;
+        n.configuration = msg;
 
         std::vector<std::string> command_params;
         command_params.push_back("run");
-        command_params.push_back(msg->package_name);
-        command_params.push_back(msg->node_name);
+        command_params.push_back(n.configuration->package_name);
+        command_params.push_back(n.configuration->node_name);
         
-        auto node_params = ParseJson(msg->param_json);
+        auto node_params = ParseJson(n.configuration->param_json);
         command_params.insert(command_params.end(), node_params.begin(), node_params.end());
 
-        auto node_remaps = ParseJson(msg->remap_json);
+        auto node_remaps = ParseJson(n.configuration->remap_json);
         command_params.insert(command_params.end(), node_remaps.begin(), node_remaps.end());
 
         rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher = 
-            this->create_publisher<std_msgs::msg::String>("/management/stdout/" + msg->node_id, 5);
+            this->create_publisher<std_msgs::msg::String>("/management/stdout/" + n.configuration->node_id, 5);
 
-        int ret = subprocess_manager.StartProcess(msg->node_id, "ros2", command_params, stream_thread, std::make_tuple(publisher));
+        n.process = std::make_shared<SubprocessWithRosPublisher>("ros2", command_params, publisher);
 
-        // process started succesfully
+        int ret = n.process->Start();
         if (ret < 10) 
         {
-            node n;
-            n.configuration = msg;
-            n.stdout_publisher = publisher;
-
-            nodes[msg->node_id] = n;
+            nodes[n.configuration->node_id] = n;
         }
 
         return ret;
     }
-    // node already running
+    // found node
     else
     {
-        auto running_node = nodes.at(msg->node_id);
+        auto running_node = it->second;
 
         // exact same config
         if(*msg == *running_node.configuration)
@@ -201,51 +192,40 @@ int NodeManager::RunNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg)
         // change in parameter
         else if(msg->param_json != running_node.configuration->param_json)
         {
-            // boost::json::value val = boost::json::parse(msg->param_json);
+            std::vector<std::string> new_params = ParseJson(msg->param_json);
 
-            // if(!val.is_array())
-            // {
-            //     RCLCPP_WARN(this->get_logger(), "Params json is not array, ignoring");
-            //     return 1;
-            // }
+            ParameterChangeOnNode(running_node.configuration->node_name, new_params);
 
-            // boost::json::array params = val.as_array();
-            // std::string params_string;
-            // for (const auto &param : params)
-            // {
-            //     if(param.is_string()) {
-            //         params_string.append(param.as_string());
-            //     }
-            // }
-
-            // StopNode(running_node.configuration);
             return 04;
         }
-        // everything else requires restart
+        // restart
         else
         {
-            StopNode(running_node.configuration);
-            return RunNode(msg);
+            DeleteNode(running_node.configuration);
+            return CreateNode(msg);
         }
     }
 }
 
-int NodeManager::StopNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg) 
+int NodeManager::DeleteNode(node_manager::msg::NodeRedCommand::ConstSharedPtr msg) 
 {
-    RCLCPP_INFO(this->get_logger(), "Stopping node");
+    auto it = nodes.find(msg->node_id);
 
-    int ret = subprocess_manager.StopProcess(msg->node_id);
+    if (it != nodes.end())
+    {
+        RCLCPP_INFO(this->get_logger(), "Deleting node");
 
-    RCLCPP_INFO(this->get_logger(), "ret: %d", ret);
+        auto node = it->second;
 
-    if (ret < 10) {
-        nodes.erase(msg->node_id);
-    }   
+        node.process->Stop();
+        
+        nodes.erase(it);
 
-    return ret;
-}
-
-int NodeManager::RunLaunchFile()
-{
-    return 3;
+        return 0;
+    }
+    else 
+    {
+        std::cerr << "This node does not exist" << std::endl;
+        return 1;
+    }
 }
