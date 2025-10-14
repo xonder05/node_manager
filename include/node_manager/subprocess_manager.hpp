@@ -133,7 +133,7 @@ protected:
 
         // todo: figure out if there is a way to check if execv() succeeded
         // one idea would be to create thread that will periodically check that the child is still alive
-        return 0;
+        return 01;
     }
 
 public:
@@ -176,7 +176,7 @@ public:
             perror("Pipe could not be generated"); 
             return; 
         }
-
+        
         init_success = true;
     }
 
@@ -199,7 +199,7 @@ public:
     int Start()
     {
         if (!init_success && process_started) {
-            return 1;
+            return 21;
         }
 
         pid = fork();
@@ -221,51 +221,61 @@ public:
     /**
      * @brief Tries to stop the child process (uses increasing force SIGINT, SIGTERM, SIGKILL)
      * 
-     * @param wait how much time does the child get to react after receiving singnal
+     * @param wait [ms], wait is how often will be checked if child exited, after 10 checks signal with increased force will be sent and this will repeat untill sigkill, so max wait time is 30 * wait
      * @return All return values are described in this_package_root/msg/README.md
      */
-    void Stop(int exit_wait_time = 1)
-    {
+    int Stop(int exit_wait_time = 500)
+    {   
         for (auto level : {SIGINT, SIGTERM, SIGKILL, INT8_MAX})
         {
-            int status;
-            pid_t res = waitpid(-pid, &status, WNOHANG);
+            bool first = true;
 
-            if (res == -1) {
-                perror("waitpid");
-                break;
-            }
-            
-            if (res == 0)
+            // pooling for result
+            for (int i = 0; i < 10; i++)
             {
-                if (level == INT8_MAX)
+                int status;
+                pid_t res = waitpid(-pid, &status, WNOHANG);
+
+                if (res == -1) {
+                    perror("waitpid");
+                    return 26;
+                }
+                
+                if (res == 0)
                 {
-                    std::cerr << "Child (pid: " << pid << ") is still running even after SIGKILL, ignoring" << std::endl;
-                    return;
+                    if (!first) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(exit_wait_time));
+                        continue;
+                    }
+
+                    if (level == INT8_MAX) {
+                        std::cerr << "Child (pid: " << pid << ") is still running even after SIGKILL, ignoring" << std::endl;
+                        return 25;
+                    }
+
+                    if (kill(-pid, level) == -1) {
+                        perror("kill");
+                    }
+
+                    first = false;
+
+                    continue;
                 }
 
-                if (kill(-pid, level) == -1) {
-                    perror("kill");
+                if (WIFEXITED(status)) {
+                    std::cout << "Child exited with code " << WEXITSTATUS(status) << std::endl;
+                } 
+                else if (WIFSIGNALED(status)) {
+                    std::cout << "Child killed by signal " << WTERMSIG(status) << std::endl;
                 }
 
-                std::this_thread::sleep_for(std::chrono::seconds(exit_wait_time));
+                reader_thread.join();
 
-                continue;
+                return 05;
+
             }
-
-            if (WIFEXITED(status)) {
-                std::cout << "Child exited with code " << WEXITSTATUS(status) << std::endl;
-            } 
-            else if (WIFSIGNALED(status)) {
-                std::cout << "Child killed by signal " << WTERMSIG(status) << std::endl;
-            }
-
-            reader_thread.join();
-
-            break;
         }
     }
-
 };
 
 class SubprocessWithConsoleOutput : public Subprocess

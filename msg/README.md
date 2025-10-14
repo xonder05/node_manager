@@ -7,17 +7,15 @@
 
 ### Response codes
 
-- 00 - ok
-    - starting
+- 00 - success
     - 01 - node started succesfully
-    - 02 - node already running
-    - 03 - launch succesfull
     - 04 - parameter change succesfull
-    - stoping
     - 05 - node stopped succesfully
 
-- 10 - manager errors
-- 20 - subprocess errors
-    - 21 - process cannot be started because it is already running
-    - 25 - process cannot be stopped because it is not running
-    - 29 - internal error
+- 10 - warnings
+    - 11 node with same configuration is already running
+    - 15 node cannot be stopped because it does not exist
+
+- 20 - errors
+    - 25 - process could not be stopped even with sigkill
+    - 26 - waitpid error

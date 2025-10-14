@@ -42,9 +42,6 @@ private:
     rclcpp::Subscription<node_manager::msg::NodeRedCommand>::SharedPtr command_subscriber;
     rclcpp::Publisher<node_manager::msg::NodeRedCommand>::SharedPtr command_publisher;
 
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_;
-    rclcpp::TimerBase::SharedPtr timer_;
-
     void commandCallback(node_manager::msg::NodeRedCommand::ConstSharedPtr msg);
     std::vector<std::string> ParseJson(std::string json);
     int ParameterChangeOnNode(std::string node_name, std::vector<std::string> params);
