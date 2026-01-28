@@ -1,23 +1,24 @@
-import os
-import launch
+from launch import LaunchDescription
+from launch.substitutions import PathJoinSubstitution
+
 from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
+from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     
-    config_file = os.path.join(
-        get_package_share_directory('node_manager'),
-        'config',
-        'config.yaml'
-    )
-
+    config_file_path = PathJoinSubstitution([
+        FindPackageShare("node_manager"),
+        "config",
+        "_manager.yaml"
+    ])
+    
     node_manager = Node(
-        package='node_manager',
-        executable='agent',
-        parameters=[config_file],
-        output='screen',
+        package="node_manager",
+        executable="node_manager",
+        parameters=[config_file_path],
+        output="screen",
     )
     
-    return launch.LaunchDescription([
+    return LaunchDescription([
         node_manager,
     ])
