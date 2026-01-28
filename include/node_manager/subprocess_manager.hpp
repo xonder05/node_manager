@@ -369,3 +369,53 @@ public:
         publisher = ros2_publisher;
     }
 };
+
+class SubprocessWithGetterOutput : public Subprocess
+{
+protected:
+
+    std::string result;
+
+    /**
+     * @brief Writes childs output into variable
+     * 
+     * This will be started in separate thread to handle output from the child process
+     * 
+     * @param fd file descriptor for the pipe where stdout and stderr of child is redirected
+     */
+    void ChildOutputHandler(int fd)
+    {
+        char buffer[256];
+        ssize_t n;
+
+        while ((n = read(fd, buffer, sizeof(buffer)-1)) > 0) 
+        {
+            buffer[n] = '\0';
+            result.append(buffer);
+        }
+    }
+
+    /**
+     * @brief Calls base Parent() and calls ChildOutputHandler() directly
+     * 
+     * @return All return values are described in this_package_root/msg/README.md
+     */
+    int Parent() override
+    {
+        int ret = Subprocess::Parent();
+
+        ChildOutputHandler(pipes[0]);
+
+        return ret;
+    }
+
+public:
+
+    SubprocessWithGetterOutput(std::string exec, std::vector<std::string> args) 
+    : Subprocess(exec, args) {}
+
+    std::string get_result()
+    {
+        return result;
+    }
+};
