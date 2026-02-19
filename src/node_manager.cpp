@@ -10,8 +10,7 @@ NodeManager::NodeManager() : Node("node_manager")
     .reliable() // reliability
     .durability_volatile(); // durability
 
-    command_subscriber = this->create_subscription<node_manager::msg::DictionarySerialized>("/management/commands", 10, std::bind(&NodeManager::command_callback, this, std::placeholders::_1));
-    command_publisher = this->create_publisher<node_manager::msg::DictionarySerialized>("/management/commands", qos);
+    commands = this->create_service<node_manager::srv::DictionarySerialized>("commands", std::bind(&NodeManager::command_callback, this, std::placeholders::_1, std::placeholders::_2));
 
     RCLCPP_INFO(get_logger(), "NodeManager initialization done.");
 }
@@ -26,9 +25,10 @@ NodeManager::~NodeManager()
     }
 }
 
-void NodeManager::command_callback(node_manager::msg::DictionarySerialized::ConstSharedPtr ros_msg) 
+void NodeManager::command_callback(node_manager::srv::DictionarySerialized::Request::ConstSharedPtr req, node_manager::srv::DictionarySerialized::Response::SharedPtr res) 
 {
-    std::unordered_map<std::string, std::string> msg = deserialize_command_message(ros_msg);
+    std::unordered_map<std::string, std::string> msg;
+    deserialize_command_message(req, msg);
 
     if (msg["manager_id"] != this->manager_id)
     {
@@ -39,45 +39,101 @@ void NodeManager::command_callback(node_manager::msg::DictionarySerialized::Cons
     // create node
     if (msg["message_type"] == "10" || msg["message_type"] == "20")
     {
-        int res = create_node(msg);
+        int ret = create_node(msg);
 
-        std::unordered_map<std::string, std::string> reply;
-        reply["manager_id"] = this->manager_id;
-        reply["message_type"] = "90";
-        reply["node_id"] = msg["node_id"];
-        reply["return_value"] = res;
+        std::unordered_map<std::string, std::string> reply = create_reply_message(msg);;
+        reply["return_value"] = std::to_string(ret);
 
-        node_manager::msg::DictionarySerialized ros_reply = serialize_command_message(reply);
-        this->command_publisher->publish(ros_reply);
+        serialize_command_message(reply, res);
     }
+    
     // call script
     else if (msg["message_type"] == "30")
     {
-        std::string json_output = call_python_script(msg);
+        auto [ret, json_output] = call_python_script(msg);
 
-        std::unordered_map<std::string, std::string> reply;
-        reply["manager_id"] = this->manager_id;
-        reply["message_type"] = "90";
-        reply["node_id"] = msg["node_id"];
+        std::unordered_map<std::string, std::string> reply = create_reply_message(msg);;
         json_string_to_dictionary(json_output, reply);
+        reply["return_value"] = std::to_string(ret);
 
-        node_manager::msg::DictionarySerialized ros_reply = serialize_command_message(reply);
-        this->command_publisher->publish(ros_reply);
+        serialize_command_message(reply, res);
     }
+
+    // read file
+    else if (msg["message_type"] == "40")
+    {
+        std::unordered_map<std::string, std::string> reply = create_reply_message(msg);;
+
+        auto [ret, json_output] = call_python_script(msg);
+
+        if (ret == 03)
+        {
+            std::unordered_map<std::string, std::string> script_output;
+            json_string_to_dictionary(json_output, script_output);
+
+            try
+            {
+                std::string file_content = read_file(script_output["file_path"]);
+                reply["file_content"] = file_content;
+                reply["return_value"] = std::to_string(04);
+            }
+            catch(const std::runtime_error& e) 
+            {
+                reply["return_value"] = std::to_string(24);
+            }
+        }
+        else
+        {
+            reply["return_value"] = std::to_string(ret);
+        }
+
+        serialize_command_message(reply, res);
+    }
+
+    // write file
+    else if (msg["message_type"] == "41")
+    {
+        std::unordered_map<std::string, std::string> reply = create_reply_message(msg);;
+
+        auto [ret, json_output] = call_python_script(msg);
+
+        if (ret == 03)
+        {
+            std::unordered_map<std::string, std::string> script_output;
+            json_string_to_dictionary(json_output, script_output);
+
+            try 
+            {
+                write_file(script_output["file_path"], msg["file_content"]);
+                reply["return_value"] = std::to_string(04);
+            }
+            catch(const std::runtime_error& e) 
+            {
+                reply["return_value"] = std::to_string(24);
+            }
+        }
+        else
+        {
+            reply["return_value"] = std::to_string(ret);
+        }
+
+        serialize_command_message(reply, res);
+    }
+
     // delete node
     else if (msg["message_type"] == "50")
     {
-        int res = delete_node(msg);
+        int ret = delete_node(msg);
 
         std::unordered_map<std::string, std::string> reply;
         reply["manager_id"] = this->manager_id;
         reply["message_type"] = "90";
         reply["node_id"] = msg["node_id"];
-        reply["return_value"] = res;
+        reply["return_value"] = std::to_string(ret);
 
-        node_manager::msg::DictionarySerialized ros_reply = serialize_command_message(reply);
-        this->command_publisher->publish(ros_reply);
+        serialize_command_message(reply, res);
     }
+
     else
     {
         RCLCPP_INFO(get_logger(), "I heard unknown message type\n");
@@ -105,6 +161,18 @@ int NodeManager::create_node(std::unordered_map<std::string, std::string> msg)
             command_params.push_back(node.config["node_name"]);
             command_params.push_back("--ros-args");
 
+            if (node.config.find("runtime_node_name") != node.config.end())
+            {
+                command_params.push_back("-r");
+                command_params.push_back("__node:=" + node.config["runtime_node_name"]);
+            }
+
+            if (node.config.find("namespace") != node.config.end())
+            {
+                command_params.push_back("-r");
+                command_params.push_back("__ns:=" + node.config["namespace"]);
+            }
+
             for (const auto &[key, value] : node.config)
             {
                 if (key.substr(0,5) == "param")
@@ -123,6 +191,7 @@ int NodeManager::create_node(std::unordered_map<std::string, std::string> msg)
                 }
             }
         }
+
         else if (node.config["message_type"] == "20") 
         {
             command_params.push_back("launch");
@@ -160,22 +229,12 @@ int NodeManager::create_node(std::unordered_map<std::string, std::string> msg)
     {
         auto running_node = it->second;
 
-        // exact same config
+        // same config
         if(msg == running_node.config)
         {
             RCLCPP_INFO(get_logger(), "Node with this id and configuration is already running, ignoring");
             return 11;
         }
-        // change in parameter
-        // else if(msg->param_json != running_node.configuration->param_json)
-        // {
-        //     // std::vector<std::string> new_params = ParseJson(msg->param_json);
-
-        //     // ParameterChangeOnNode(running_node.configuration->node_name, new_params);
-
-        //     // todo return values here
-        //     return 04;
-        // }
         // restart
         else
         {
@@ -195,7 +254,7 @@ int NodeManager::delete_node(std::unordered_map<std::string, std::string> msg)
 
         auto node = it->second;
 
-        int res = node.process->Stop();
+        auto [res, status] = node.process->Stop();
         
         nodes.erase(it);
 
@@ -208,7 +267,7 @@ int NodeManager::delete_node(std::unordered_map<std::string, std::string> msg)
     }
 }
 
-std::string NodeManager::call_python_script(std::unordered_map<std::string, std::string> msg)
+std::tuple<int, std::string> NodeManager::call_python_script(std::unordered_map<std::string, std::string> msg)
 {
     RCLCPP_INFO(get_logger(), "Calling Python script");
 
@@ -217,26 +276,14 @@ std::string NodeManager::call_python_script(std::unordered_map<std::string, std:
     command_params.push_back(path);
 
     // params
-    if (msg["script_name"] == "list_nodes" || msg["script_name"] == "list_launch")
+    if (msg["script_name"] == "list_nodes" || msg["script_name"] == "list_launch_files" || msg["script_name"] == "list_config_files")
+    {
+        command_params.push_back(msg["package_name"]);
+    }
+    if (msg["script_name"] == "resolve_file_path" || msg["script_name"] == "list_launch_arguments")
     {
         command_params.push_back(msg["package_name"]);   
-    }
-    if (msg["script_name"] == "get_launch_arg")
-    {
-        command_params.push_back(msg["launch_file_path"]);   
-    }
-    if (msg["script_name"] == "get_interface_path")
-    {
-        command_params.push_back(msg["interface_name"]);   
-    }
-    if (msg["script_name"] == "get_full_launch_path")
-    {
-        command_params.push_back(msg["package_name"]);   
-        command_params.push_back(msg["launch_file_name"]);   
-    }
-    if (msg["script_name"] == "get_file_content")
-    {
-        command_params.push_back(msg["launch_file_path"]);   
+        command_params.push_back(msg["file_name"]);   
     }
 
     for (const auto s : command_params)
@@ -245,35 +292,50 @@ std::string NodeManager::call_python_script(std::unordered_map<std::string, std:
     }
 
     std::shared_ptr<SubprocessWithGetterOutput> process = std::make_shared<SubprocessWithGetterOutput>("python3", command_params);
-    int ret = process->Start();
+    process->Start();
     std::string result = process->get_result();
+    auto [ret, status] = process->Stop();
 
-    return result;
+    if (ret != 05)
+    {
+        return std::make_tuple(ret, "{}");
+    }
+    else if (WEXITSTATUS(status) != 0) 
+    {
+        return std::make_tuple(23, "{}");
+    }
+    else
+    {
+        return std::make_tuple(03, result);
+    }
 }
 
-std::unordered_map<std::string, std::string> NodeManager::deserialize_command_message(node_manager::msg::DictionarySerialized::ConstSharedPtr msg)
+std::unordered_map<std::string, std::string> NodeManager::create_reply_message(std::unordered_map<std::string, std::string> msg)
 {
-    std::unordered_map<std::string, std::string> dict;
+    std::unordered_map<std::string, std::string> reply;
+    reply["message_type"] = "90";
+    reply["manager_id"] = this->manager_id;
+    reply["node_id"] = msg["node_id"];
 
-    for (const auto &entry: msg->data) {
+    return reply;
+}
+
+void NodeManager::deserialize_command_message(node_manager::srv::DictionarySerialized::Request::ConstSharedPtr msg, std::unordered_map<std::string, std::string>& dict)
+{
+    for (const auto &entry: msg->data) 
+    {
         dict[entry.key] = entry.value;
     }
-
-    return dict;
 }
 
-node_manager::msg::DictionarySerialized NodeManager::serialize_command_message(std::unordered_map<std::string, std::string> dict)
+void NodeManager::serialize_command_message(std::unordered_map<std::string, std::string> dict, node_manager::srv::DictionarySerialized::Response::SharedPtr msg)
 {
-    node_manager::msg::DictionarySerialized msg;
-
     for (const auto &[key, value] : dict)
     {
-        msg.data.emplace_back();
-        msg.data.back().key = key;
-        msg.data.back().value = value;
+        msg->data.emplace_back();
+        msg->data.back().key = key;
+        msg->data.back().value = value;
     }
-
-    return msg;
 }
 
 void NodeManager::json_string_to_dictionary(std::string json_string, std::unordered_map<std::string, std::string> &dictionary)
@@ -301,38 +363,28 @@ void NodeManager::json_string_to_dictionary(std::string json_string, std::unorde
     }
 }
 
-// int NodeManager::ParameterChangeOnNode(std::string node_name, std::vector<std::string> params)
-// {
-//     auto client = std::make_shared<rclcpp::SyncParametersClient>(this, node_name);
+std::string NodeManager::read_file(std::string file_path)
+{
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Cannot open file (ifstream)");
+    }
 
-//     if (!client->wait_for_service(std::chrono::seconds(1))) {
-//         RCLCPP_ERROR(get_logger(), "Parameter service not available on node %s", node_name);
-//         return 1;
-//     }
+    return std::string(
+        (std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>()
+    );
+}
 
-//     for (auto param : params)
-//     {
-//         auto pos = param.find(":=");
-//         if (pos != std::string::npos) 
-//         {
-//             std::string name  = param.substr(0, pos);
-//             std::string value = param.substr(pos + 2);
+void NodeManager::write_file(std::string file_path, std::string file_content)
+{
+    std::ofstream file(file_path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Cannot open file (ofstream)");
+    }
 
-//             auto results = client->set_parameters({rclcpp::Parameter(name, value)});
-
-//             for (auto & result : results)
-//             {
-//                 if (!result.successful) 
-//                 {
-//                     RCLCPP_WARN(get_logger(), "Failed to set param %s: %s", name, result.reason.c_str());
-//                     return 1;
-//                 }   
-//             }
-//         }
-//     }
-
-//     return 0;
-// }
+    file.write(file_content.data(), file_content.size());
+}
 
 int main(int argc, char **argv)
 {

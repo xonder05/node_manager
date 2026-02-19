@@ -16,6 +16,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <tuple>
 #include <chrono>
 #include <sstream>
 
@@ -222,10 +223,10 @@ public:
      * @brief Tries to stop the child process (uses increasing force SIGINT, SIGTERM, SIGKILL)
      * 
      * @param wait [ms], wait is how often will be checked if child exited, after 10 checks signal with increased force will be sent and this will repeat untill sigkill, so max wait time is 30 * wait
-     * @return All return values are described in this_package_root/msg/README.md
+     * @return Tuple of ints, first value is return value as described in this_package_root/msg/README.md, second value is status of waitpid call.
      */
-    int Stop(int exit_wait_time = 500)
-    {   
+    std::tuple<int, int> Stop(int exit_wait_time = 500)
+    {
         for (auto level : {SIGINT, SIGTERM, SIGKILL, INT8_MAX})
         {
             bool first = true;
@@ -238,7 +239,7 @@ public:
 
                 if (res == -1) {
                     perror("waitpid");
-                    return 26;
+                    return std::make_tuple(26, -1);
                 }
                 
                 if (res == 0)
@@ -250,7 +251,7 @@ public:
 
                     if (level == INT8_MAX) {
                         std::cerr << "Child (pid: " << pid << ") is still running even after SIGKILL, ignoring" << std::endl;
-                        return 25;
+                        return std::make_tuple(25, -1);
                     }
 
                     if (kill(-pid, level) == -1) {
@@ -269,10 +270,11 @@ public:
                     std::cout << "Child killed by signal " << WTERMSIG(status) << std::endl;
                 }
 
-                reader_thread.join();
+                if (reader_thread.joinable()) {
+                    reader_thread.join();
+                }
 
-                return 05;
-
+                return std::make_tuple(05, status);
             }
         }
     }

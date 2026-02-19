@@ -8,7 +8,7 @@ ament_export_dependencies(rosidl_default_runtime)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Entry.msg"
-  "msg/DictionarySerialized.msg"
+  "srv/DictionarySerialized.srv"
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
