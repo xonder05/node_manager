@@ -41,6 +41,7 @@ private:
     std::string manager_id;
 
     rclcpp::Service<node_manager::srv::DictionarySerialized>::SharedPtr commands;
+    rclcpp::TimerBase::SharedPtr timer;
 
     void command_callback(node_manager::srv::DictionarySerialized::Request::ConstSharedPtr req, node_manager::srv::DictionarySerialized::Response::SharedPtr res);
 

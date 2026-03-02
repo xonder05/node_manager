@@ -10,7 +10,23 @@ NodeManager::NodeManager() : Node("node_manager")
     .reliable() // reliability
     .durability_volatile(); // durability
 
-    commands = this->create_service<node_manager::srv::DictionarySerialized>("commands", std::bind(&NodeManager::command_callback, this, std::placeholders::_1, std::placeholders::_2));
+    std::string service_name = "/management/commands/" + manager_id;
+
+    commands = this->create_service<node_manager::srv::DictionarySerialized>(
+        service_name, std::bind(&NodeManager::command_callback, this, std::placeholders::_1, std::placeholders::_2)
+    );
+
+    timer = this->create_wall_timer(std::chrono::milliseconds(1000), 
+    [this, service_name]() 
+    {
+        timer->cancel();
+
+        if (this->count_services(service_name) > 1)
+        {
+            RCLCPP_ERROR(get_logger(), "Detected multiple servers on service '%s', shutting down", service_name.c_str());
+            rclcpp::shutdown();
+        }
+    });
 
     RCLCPP_INFO(get_logger(), "NodeManager initialization done.");
 }
@@ -29,12 +45,6 @@ void NodeManager::command_callback(node_manager::srv::DictionarySerialized::Requ
 {
     std::unordered_map<std::string, std::string> msg;
     deserialize_command_message(req, msg);
-
-    if (msg["manager_id"] != this->manager_id)
-    {
-        RCLCPP_INFO(get_logger(), "Recieved command for someone else, ignoring");
-        return;
-    }
 
     // create node
     if (msg["message_type"] == "10" || msg["message_type"] == "20")
